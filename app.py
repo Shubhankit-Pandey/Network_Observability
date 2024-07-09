@@ -1,87 +1,56 @@
 from flask import Flask, render_template, jsonify
-from flask_socketio import SocketIO
-from flask_restful import Api, Resource
-import asyncio
-import json
+from flask_socketio import SocketIO, emit
 import random
-from datetime import datetime
-from threading import Thread
+import threading
+import time
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
-socketio = SocketIO(app)  # Removed async_mode parameter
-api = Api(app)
+socketio = SocketIO(app, async_mode='threading')
 
-NUM_SUBNETWORKS = 3
-NODES_PER_SUBNETWORK = 5
+# Simulated data generation
+nodes_data = {
+    'subnet1': [
+        {'name': 'Device1', 'ip': '192.168.1.1', 'subnetwork': 'subnet1', 'metrics': {'cpu_usage': 0, 'memory_usage': 0}},
+        {'name': 'Device2', 'ip': '192.168.1.2', 'subnetwork': 'subnet1', 'metrics': {'cpu_usage': 0, 'memory_usage': 0}}
+    ],
+    'subnet2': [
+        {'name': 'Device3', 'ip': '192.168.2.1', 'subnetwork': 'subnet2', 'metrics': {'cpu_usage': 0, 'memory_usage': 0}},
+        {'name': 'Device4', 'ip': '192.168.2.2', 'subnetwork': 'subnet2', 'metrics': {'cpu_usage': 0, 'memory_usage': 0}}
+    ]
+}
 
-subnets = {f"Subnet{i+1}": [] for i in range(NUM_SUBNETWORKS)}
-nodes_data = {}
-
-for i in range(NUM_SUBNETWORKS):
-    for j in range(NODES_PER_SUBNETWORK):
-        node_name = f"Node_{i+1}_{j+1}"
-        subnets[f"Subnet{i+1}"].append(node_name)
-        nodes_data[node_name] = None
-
-def generate_metrics():
-    return {
-        "cpuUsage": f"{random.randint(0, 100)}%",
-        "memoryUsage": f"{random.randint(0, 100)}%",
-        "bandwidthUtilization": f"{random.randint(0, 100)}%",
-        "packetLoss": f"{random.uniform(0, 1):.2%}",
-        "latency": f"{random.randint(1, 100)}ms",
-        "errorRates": f"{random.uniform(0, 1):.2%}",
-        "trafficVolume": f"{random.randint(100, 1000)}GB",
-        "topTalkers": [f"192.168.1.{random.randint(1, 255)}" for _ in range(2)],
-        "powerStatus": random.choice(["On", "Off"]),
-        "uptime": f"{random.randint(1, 365)} days",
-        "interfaceStatus": random.choice(["Up", "Down"]),
-        "timestamp": datetime.now().isoformat()
-    }
-
-async def node(name, queue):
+# Function to update metrics periodically
+def update_metrics():
     while True:
-        metrics = generate_metrics()
-        await queue.put((name, metrics))
-        await asyncio.sleep(random.uniform(0.5, 2.0))
+        for subnet in nodes_data.values():
+            for device in subnet:
+                device['metrics']['cpu_usage'] = random.randint(0, 100)
+                device['metrics']['memory_usage'] = random.randint(0, 100)
+        
+        # Emit updated data to all clients
+        socketio.emit('metrics_update', nodes_data, namespace='/metrics')
+        
+        time.sleep(5)  # Update interval in seconds
 
-async def listener(queue):
-    while True:
-        node_name, metrics = await queue.get()
-        nodes_data[node_name] = metrics
-        socketio.emit('update', json.dumps(nodes_data))
-        await asyncio.sleep(1)
+# Start background thread for updating metrics
+thread = threading.Thread(target=update_metrics)
+thread.daemon = True
+thread.start()
 
-def start_simulation():
-    queue = asyncio.Queue()
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    node_tasks = [node(node_name, queue) for node_name in nodes_data.keys()]
-    loop.create_task(listener(queue))
-    loop.run_until_complete(asyncio.gather(*node_tasks))
-
-class SubnetMetrics(Resource):
-    def get(self, node_name):
-        for subnet, nodes in subnets.items():
-            if node_name in nodes:
-                metrics = {n: nodes_data[n] for n in nodes if nodes_data[n] is not None}
-                return jsonify(metrics)
-        return {"error": "Node not found in any subnet"}, 404
-
-api.add_resource(SubnetMetrics, '/metrics/<string:node_name>')
-
+# Routes
 @app.route('/')
-def index():
-    return render_template('index.html', subnets=subnets)
+def admin():
+    return render_template('index.html')
 
 @app.route('/node/<string:node_name>')
-def node_view(node_name):
-    for subnet, nodes in subnets.items():
-        if node_name in nodes:
-            return render_template('node.html', node_name=node_name, subnet=subnet, nodes=nodes)
-    return "Node not found", 404
+def node(node_name):
+    return render_template('node.html', node_name=node_name)
 
-if __name__ == "__main__":
-    Thread(target=start_simulation).start()
+# SocketIO event handlers
+@socketio.on('connect', namespace='/metrics')
+def connect():
+    emit('metrics_update', nodes_data)
+
+if __name__ == '__main__':
     socketio.run(app, debug=True)
